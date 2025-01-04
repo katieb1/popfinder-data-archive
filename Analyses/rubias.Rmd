@@ -1,0 +1,693 @@
+---
+title: "Rubias Assignments"
+author: "Katie Birchard"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Setup
+
+## Load packages
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rubias)
+library(sf)
+library(ggspatial)
+library(tibble)
+library(dplyr)
+library(adegenet)
+library(mltools)
+library(caret)
+
+
+if (!require("devtools")) install.packages("devtools")
+# devtools::install_github("thierrygosselin/radiator")
+library(radiator)
+
+# Custom helper functions
+source("./helperFunctions.R")
+```
+
+## Define constants
+```{r}
+# Input folders
+simStructureFolder <- "F:/PopFinder/Data/simulated data/structure"
+empDataFolder <- "F:/PopFinder/Data/empirical data"
+
+# filenames
+LSStructurePrefix <- "model1_LS_500random"
+MSStructurePrefix <- "model2_MS_500random"
+HSStructurePrefix <- "model3_HS_500random"
+lespStructurePrefix <- "lesp_2000_all"
+tbmuStructurePrefix <- "tbmu_2000_all"
+nofuStructurePrefix <- "nofu4_2000_all"
+
+lespPopmap <- "popmap_54inds.txt"
+lespPopmapNA <- "popmap_NAs.txt"
+tbmuPopmap <- "popmap.txt"
+tbmuPopmapNA <- "popmap_NAs.txt"
+nofuPopmap <- "popmap_4cols2.txt"
+nofuPopmapNA <- "popmap_4cols_NAs.txt"
+
+# Output folders
+outputFolder <- "F:/PopFinder/Results/rubias"
+LSFolder <- "LS_output"
+MSFolder <- "MS_output"
+HSFolder <- "HS_output"
+lespFolder <- "lesp"
+tbmuFolder <- "tbmu"
+nofuFolder <- "nofu"
+```
+
+# Simulated Data ----
+
+## Pop Crosswalk
+```{r}
+# Crosswalk between population names and assignPOP IDs
+pop_xwalk <- data.frame(p1 = c(1),
+                        p2 = c(2),
+                        p3 = c(3),
+                        p4 = c(4),
+                        p5 = c(5))
+pop_size <- 40
+```
+
+
+## Weak Structure (LS)
+
+### Load data for LS
+```{r}
+modOutputFolder <- file.path(outputFolder, LSFolder)
+datAll <- loadDataForRubias(
+  simStructureFolder, LSStructurePrefix, 200, 4800, 532, modOutputFolder)
+datUnknown <- datAll %>% filter(sample_type == "mixture")
+dat <- datAll %>% filter(sample_type == "reference")
+```
+
+### Run assignment
+```{r}
+#self assignment back to reference populations
+start <- Sys.time()
+sa <- self_assign(reference=dat, gen_start_col = 6) # what is this 5?
+end <- Sys.time()
+runtime <- end - start
+
+#summarize results by collection/population - repu_scaled_likelihood is 
+# probability of an individual belonging to that collection
+sa_to_repu <- sa %>%
+  group_by(indiv, repunit, collection, inferred_collection) %>%
+  summarise(repu_scaled_likelihood = sum(scaled_likelihood))
+
+test_results <- sa_to_repu %>%
+  group_by(indiv, repunit, collection) %>%
+  arrange(desc(repu_scaled_likelihood)) %>%
+  summarize(pred.pop = first(inferred_collection)) %>%
+  rename(real.pop = collection) %>%
+      mutate(success = case_when(pred.pop == real.pop ~ 1,
+                                 pred.pop != real.pop ~ 0))
+
+test_results %>% 
+  group_by(real.pop) %>%
+  summarize(accuracy = mean(success))
+
+assign_mat <- createConfusionMatrix(test_results, pop_xwalk)
+
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "test_metrics.csv"))
+
+write.csv(test_results, file=file.path(modOutputFolder, "rubias_self_assignments.csv"))
+```
+
+### Assign unknowns
+```{r}
+start <- Sys.time()
+assignResults <- infer_mixture(
+  reference = dat, mixture = datUnknown, gen_start_col = 6)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# PofZ is the posterior means of group membership in each collection
+# AKA Bayes Estimator
+# It's essentially created posterior distributions for each of the collections
+# and then determined how the unknown samples fall within these distributions
+assignResults <- assignResults$indiv_posteriors %>%
+  group_by(indiv) %>%
+  top_n(1, PofZ) %>%
+  ungroup()
+
+assignResults <- assignResults %>%
+  rename(pred.pop = collection)
+
+numericIDs <- unlist(str_split(assignResults$indiv, "i"))
+numericIDs <- as.numeric(numericIDs[numericIDs != ""])
+assignResults <- assignResults %>% mutate(Ind.ID.numeric = numericIDs)
+assignResults <- assignResults %>% 
+  mutate(real.pop = case_when(Ind.ID.numeric < 1000 ~ 1,
+                              Ind.ID.numeric %in% 1000:2000 ~ 2,
+                              Ind.ID.numeric %in% 2000:3000 ~ 3,
+                              Ind.ID.numeric %in% 3000:4000 ~ 4,
+                              Ind.ID.numeric %in% 4000:5000 ~ 5))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(indiv, pred.pop, real.pop) %>%
+  rename(sampleID = indiv,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(modOutputFolder, "assignment_predictions.csv"))
+
+# Create confusion matrix
+assign_mat <- createConfusionMatrix(assignResults, pop_xwalk)
+
+# Write performance metrics to CSV
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "unknown_metrics.csv"))
+```
+## Intermediate Structure (MS)
+
+### Load data for MS
+```{r}
+modOutputFolder <- file.path(outputFolder, MSFolder)
+datAll <- loadDataForRubias(
+  simStructureFolder, MSStructurePrefix, 200, 4800, 532, modOutputFolder)
+datUnknown <- datAll %>% filter(sample_type == "mixture")
+dat <- datAll %>% filter(sample_type == "reference")
+```
+
+### Run assignment
+```{r}
+#self assignment back to reference populations
+start <- Sys.time()
+sa <- self_assign(reference=dat, gen_start_col = 5) # what is this 5?
+end <- Sys.time()
+runtime <- end - start
+
+#summarize results by collection/population - repu_scaled_likelihood is 
+# probability of an individual belonging to that collection
+sa_to_repu <- sa %>%
+  group_by(indiv, repunit, collection, inferred_collection) %>%
+  summarise(repu_scaled_likelihood = sum(scaled_likelihood))
+
+test_results <- sa_to_repu %>%
+  group_by(indiv, repunit, collection) %>%
+  arrange(desc(repu_scaled_likelihood)) %>%
+  summarize(pred.pop = first(inferred_collection)) %>%
+  rename(real.pop = collection) %>%
+      mutate(success = case_when(pred.pop == real.pop ~ 1,
+                                 pred.pop != real.pop ~ 0))
+
+test_results %>% 
+  group_by(real.pop) %>%
+  summarize(accuracy = mean(success))
+
+assign_mat <- createConfusionMatrix(test_results, pop_xwalk)
+
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "test_metrics.csv"))
+
+write.csv(test_results, file=file.path(modOutputFolder, "rubias_self_assignments.csv"))
+```
+
+### Assign unknowns
+```{r}
+start <- Sys.time()
+assignResults <- infer_mixture(
+  reference = dat, mixture = datUnknown, gen_start_col = 5)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# PofZ is the posterior means of group membership in each collection
+# AKA Bayes Estimator
+# It's essentially created posterior distributions for each of the collections
+# and then determined how the unknown samples fall within these distributions
+assignResults <- assignResults$indiv_posteriors %>%
+  group_by(indiv) %>%
+  top_n(1, PofZ) %>%
+  ungroup()
+
+assignResults <- assignResults %>%
+  rename(pred.pop = collection)
+
+numericIDs <- unlist(str_split(assignResults$indiv, "i"))
+numericIDs <- as.numeric(numericIDs[numericIDs != ""])
+assignResults <- assignResults %>% mutate(Ind.ID.numeric = numericIDs)
+assignResults <- assignResults %>% 
+  mutate(real.pop = case_when(Ind.ID.numeric < 1000 ~ 1,
+                              Ind.ID.numeric %in% 1000:2000 ~ 2,
+                              Ind.ID.numeric %in% 2000:3000 ~ 3,
+                              Ind.ID.numeric %in% 3000:4000 ~ 4,
+                              Ind.ID.numeric %in% 4000:5000 ~ 5))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(indiv, pred.pop, real.pop) %>%
+  rename(sampleID = indiv,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(modOutputFolder, "assignment_predictions.csv"))
+
+# Create confusion matrix
+assign_mat <- createConfusionMatrix(assignResults, pop_xwalk)
+
+# Write performance metrics to CSV
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "unknown_metrics.csv"))
+```
+
+## Strong Structure (HS)
+
+### Load data for HS
+```{r}
+modOutputFolder <- file.path(outputFolder, HSFolder)
+datAll <- loadDataForRubias(
+  simStructureFolder, HSStructurePrefix, 200, 4800, 532, modOutputFolder)
+datUnknown <- datAll %>% filter(sample_type == "mixture")
+dat <- datAll %>% filter(sample_type == "reference")
+```
+
+### Run assignment
+```{r}
+#self assignment back to reference populations
+start <- Sys.time()
+sa <- self_assign(reference=dat, gen_start_col = 5) # what is this 5?
+end <- Sys.time()
+runtime <- end - start
+
+#summarize results by collection/population - repu_scaled_likelihood is 
+# probability of an individual belonging to that collection
+sa_to_repu <- sa %>%
+  group_by(indiv, repunit, collection, inferred_collection) %>%
+  summarise(repu_scaled_likelihood = sum(scaled_likelihood))
+
+test_results <- sa_to_repu %>%
+  group_by(indiv, repunit, collection) %>%
+  arrange(desc(repu_scaled_likelihood)) %>%
+  summarize(pred.pop = first(inferred_collection)) %>%
+  rename(real.pop = collection) %>%
+      mutate(success = case_when(pred.pop == real.pop ~ 1,
+                                 pred.pop != real.pop ~ 0))
+
+test_results %>% 
+  group_by(real.pop) %>%
+  summarize(accuracy = mean(success))
+
+assign_mat <- createConfusionMatrix(test_results, pop_xwalk)
+
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "test_metrics.csv"))
+
+write.csv(test_results, file=file.path(modOutputFolder, "rubias_self_assignments.csv"))
+```
+
+### Assign unknowns
+```{r}
+start <- Sys.time()
+assignResults <- infer_mixture(
+  reference = dat, mixture = datUnknown, gen_start_col = 5)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# PofZ is the posterior means of group membership in each collection
+# AKA Bayes Estimator
+# It's essentially created posterior distributions for each of the collections
+# and then determined how the unknown samples fall within these distributions
+assignResults <- assignResults$indiv_posteriors %>%
+  group_by(indiv) %>%
+  top_n(1, PofZ) %>%
+  ungroup()
+
+assignResults <- assignResults %>%
+  rename(pred.pop = collection)
+
+numericIDs <- unlist(str_split(assignResults$indiv, "i"))
+numericIDs <- as.numeric(numericIDs[numericIDs != ""])
+assignResults <- assignResults %>% mutate(Ind.ID.numeric = numericIDs)
+assignResults <- assignResults %>% 
+  mutate(real.pop = case_when(Ind.ID.numeric < 1000 ~ 1,
+                              Ind.ID.numeric %in% 1000:2000 ~ 2,
+                              Ind.ID.numeric %in% 2000:3000 ~ 3,
+                              Ind.ID.numeric %in% 3000:4000 ~ 4,
+                              Ind.ID.numeric %in% 4000:5000 ~ 5))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(indiv, pred.pop, real.pop) %>%
+  rename(sampleID = indiv,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(modOutputFolder, "assignment_predictions.csv"))
+
+# Create confusion matrix
+assign_mat <- createConfusionMatrix(assignResults, pop_xwalk)
+
+# Write performance metrics to CSV
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "unknown_metrics.csv"))
+```
+
+# Empirical Data ----
+
+## LESP
+
+### Load data for LESP
+```{r}
+modOutputFolder <- file.path(outputFolder, lespFolder)
+lespStructureFolder <- file.path(empDataFolder, lespFolder)
+pop_xwalk <- data.frame(Hernyken=1, Baccalieu=2, Corrosol=3, Kent=4, Green=5)
+
+# Determine number of knowns and unknowns
+popmap <- read_tsv(file.path(empDataFolder, lespFolder, lespPopmap))
+popmapNA <- read_tsv(file.path(empDataFolder, lespFolder, lespPopmapNA))
+numInds <- nrow(popmap)
+
+datAll <- loadDataForRubiasAll(
+  lespStructureFolder, lespStructurePrefix, numInds, 
+  2000, popmap, modOutputFolder)
+datUnknown <- datAll %>% filter(sample_type == "mixture")
+dat <- datAll %>% filter(sample_type == "reference")
+```
+
+### Run assignment
+```{r}
+#self assignment back to reference populations
+start <- Sys.time()
+sa <- self_assign(reference=dat, gen_start_col = 5) # what is this 5?
+end <- Sys.time()
+runtime <- end - start
+
+#summarize results by collection/population - repu_scaled_likelihood is 
+# probability of an individual belonging to that collection
+sa_to_repu <- sa %>%
+  group_by(indiv, repunit, collection, inferred_collection) %>%
+  dplyr::summarise(repu_scaled_likelihood = sum(scaled_likelihood))
+
+test_results <- sa_to_repu %>%
+  group_by(indiv, repunit, collection) %>%
+  arrange(desc(repu_scaled_likelihood)) %>%
+  dplyr::summarize(pred.pop = first(inferred_collection)) %>%
+  dplyr::rename(real.pop = collection) %>%
+      mutate(success = case_when(pred.pop == real.pop ~ 1,
+                                 pred.pop != real.pop ~ 0))
+
+test_results %>% 
+  group_by(real.pop) %>%
+  dplyr::summarize(accuracy = mean(success))
+
+assign_mat <- createConfusionMatrix(test_results, pop_xwalk)
+colnames(assign_mat) <- colnames(pop_xwalk)
+rownames(assign_mat) <- colnames(pop_xwalk)
+
+# TODO: update reportPerformanceMetrics for working with empirical pops
+perfMetrics <- reportPerformanceMetricsEmpirical(assign_mat, pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "test_metrics.csv"))
+
+write.csv(test_results, file=file.path(modOutputFolder, "rubias_self_assignments.csv"))
+```
+
+### Assign unknowns
+```{r}
+start <- Sys.time()
+assignResults <- infer_mixture(
+  reference = dat, mixture = datUnknown, gen_start_col = 5)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# PofZ is the posterior means of group membership in each collection
+# AKA Bayes Estimator
+# It's essentially created posterior distributions for each of the collections
+# and then determined how the unknown samples fall within these distributions
+assignResults <- assignResults$indiv_posteriors %>%
+  group_by(indiv) %>%
+  top_n(1, PofZ) %>%
+  ungroup()
+
+assignResults <- assignResults %>%
+  rename(pred.pop = collection)
+
+assignResults <- merge(assignResults, popmap, by.x = "indiv", by.y = "sampleID")
+assignResults <- merge(assignResults, pop_xwalk %>% gather(), by.x = "pred.pop", by.y = "value")
+assignResults <- assignResults %>%
+  dplyr::select(-pred.pop) %>%
+  rename(pred.pop = key,
+         real.pop =pop)
+assignResults <- assignResults %>% 
+  mutate(success = case_when(pred.pop == real.pop ~ 1,
+                             pred.pop != real.pop ~ 0))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(indiv, pred.pop, real.pop) %>%
+  rename(sampleID = indiv,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(modOutputFolder, "assignment_predictions.csv"))
+
+# Create confusion matrix
+assign_mat <- createConfusionMatrix(assignResults, pop_xwalk, FALSE)
+
+# Write performance metrics to CSV
+perfMetrics <- reportPerformanceMetricsEmpirical(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "unknown_metrics.csv"))
+```
+
+## TBMU
+
+### Load data for TBMU
+```{r}
+modOutputFolder <- file.path(outputFolder, tbmuFolder)
+tbmuStructureFolder <- file.path(empDataFolder, tbmuFolder)
+pop_xwalk <- data.frame(akp=1, dig=4, gan=6, hor=7, lat=8, min=9, pli=10)
+
+# Determine number of knowns and unknowns
+popmap <- read_tsv(file.path(empDataFolder, tbmuFolder, tbmuPopmap))
+popmapNA <- read_tsv(file.path(empDataFolder, tbmuFolder, tbmuPopmapNA))
+numInds <- nrow(popmap)
+
+datAll <- loadDataForRubiasAll(
+  tbmuStructureFolder, tbmuStructurePrefix, numInds, 
+  2000, popmap, modOutputFolder)
+# datUnknown <- datAll %>% filter(sample_type == "mixture")
+dat <- datAll %>% filter(sample_type == "reference")
+
+# Remove all individuals from coa, cog, and fun
+popmap <- popmap %>% filter(!pop %in% c("fun", "coa", "cog")) 
+popmapNA <- popmapNA %>% filter(!pop %in% c("fun", "coa", "cog")) 
+dat <- dat %>% filter(indiv %in% popmap$sampleID)
+```
+
+### Run assignment
+```{r}
+#self assignment back to reference populations
+start <- Sys.time()
+sa <- self_assign(reference=dat, gen_start_col = 5) # what is this 5?
+end <- Sys.time()
+runtime <- end - start
+
+#summarize results by collection/population - repu_scaled_likelihood is 
+# probability of an individual belonging to that collection
+sa_to_repu <- sa %>%
+  group_by(indiv, repunit, collection, inferred_collection) %>%
+  dplyr::summarise(repu_scaled_likelihood = sum(scaled_likelihood))
+
+test_results <- sa_to_repu %>%
+  group_by(indiv, repunit, collection) %>%
+  arrange(desc(repu_scaled_likelihood)) %>%
+  dplyr::summarize(pred.pop = first(inferred_collection)) %>%
+  dplyr::rename(real.pop = collection) %>%
+      mutate(success = case_when(pred.pop == real.pop ~ 1,
+                                 pred.pop != real.pop ~ 0))
+
+test_results %>% 
+  group_by(real.pop) %>%
+  dplyr::summarize(accuracy = mean(success))
+
+assign_mat <- createConfusionMatrix(test_results, pop_xwalk)
+colnames(assign_mat) <- colnames(pop_xwalk)
+rownames(assign_mat) <- colnames(pop_xwalk)
+
+# TODO: update reportPerformanceMetrics for working with empirical pops
+perfMetrics <- reportPerformanceMetricsEmpirical(assign_mat, pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "test_metrics.csv"))
+
+write.csv(test_results, file=file.path(modOutputFolder, "rubias_self_assignments.csv"))
+```
+
+### Assign unknowns
+```{r}
+start <- Sys.time()
+assignResults <- infer_mixture(
+  reference = dat, mixture = datUnknown, gen_start_col = 5)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# PofZ is the posterior means of group membership in each collection
+# AKA Bayes Estimator
+# It's essentially created posterior distributions for each of the collections
+# and then determined how the unknown samples fall within these distributions
+assignResults <- assignResults$indiv_posteriors %>%
+  group_by(indiv) %>%
+  top_n(1, PofZ) %>%
+  ungroup()
+
+assignResults <- assignResults %>%
+  rename(pred.pop = collection)
+
+assignResults <- merge(assignResults, popmap, by.x = "indiv", by.y = "sampleID")
+assignResults <- merge(assignResults, pop_xwalk %>% gather(), by.x = "pred.pop", by.y = "value")
+assignResults <- assignResults %>%
+  dplyr::select(-pred.pop) %>%
+  rename(pred.pop = key,
+         real.pop =pop)
+assignResults <- assignResults %>% 
+  mutate(success = case_when(pred.pop == real.pop ~ 1,
+                             pred.pop != real.pop ~ 0))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(indiv, pred.pop, real.pop) %>%
+  rename(sampleID = indiv,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(modOutputFolder, "assignment_predictions.csv"))
+
+# Create confusion matrix
+assign_mat <- createConfusionMatrix(assignResults, pop_xwalk, FALSE)
+
+# Write performance metrics to CSV
+perfMetrics <- reportPerformanceMetricsEmpirical(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "unknown_metrics.csv"))
+```
+
+## NOFU
+
+### Load data for NOFU
+```{r}
+modOutputFolder <- file.path(outputFolder, nofuFolder)
+nofuStructureFolder <- file.path(empDataFolder, nofuFolder)
+pop_xwalk <- data.frame(CV=1, FI=2, QU=3, PLI=4)
+
+# Determine number of knowns and unknowns
+popmap <- read_tsv(file.path(empDataFolder, nofuFolder, nofuPopmap))
+popmapNA <- read_tsv(file.path(empDataFolder, nofuFolder, nofuPopmapNA))
+numInds <- nrow(popmap)
+
+datAll <- loadDataForRubiasAll(
+  nofuStructureFolder, nofuStructurePrefix, numInds, 
+  2000, popmap, modOutputFolder)
+datUnknown <- datAll %>% filter(sample_type == "mixture")
+dat <- datAll %>% filter(sample_type == "reference")
+```
+
+### Run assignment
+```{r}
+#self assignment back to reference populations
+start <- Sys.time()
+sa <- self_assign(reference=dat, gen_start_col = 5) # what is this 5?
+end <- Sys.time()
+runtime <- end - start
+
+#summarize results by collection/population - repu_scaled_likelihood is 
+# probability of an individual belonging to that collection
+sa_to_repu <- sa %>%
+  group_by(indiv, repunit, collection, inferred_collection) %>%
+  dplyr::summarise(repu_scaled_likelihood = sum(scaled_likelihood))
+
+test_results <- sa_to_repu %>%
+  group_by(indiv, repunit, collection) %>%
+  arrange(desc(repu_scaled_likelihood)) %>%
+  dplyr::summarize(pred.pop = first(inferred_collection)) %>%
+  dplyr::rename(real.pop = collection) %>%
+      mutate(success = case_when(pred.pop == real.pop ~ 1,
+                                 pred.pop != real.pop ~ 0))
+
+test_results %>% 
+  group_by(real.pop) %>%
+  dplyr::summarize(accuracy = mean(success))
+
+assign_mat <- createConfusionMatrix(test_results, pop_xwalk)
+colnames(assign_mat) <- colnames(pop_xwalk)
+rownames(assign_mat) <- colnames(pop_xwalk)
+
+# TODO: update reportPerformanceMetrics for working with empirical pops
+perfMetrics <- reportPerformanceMetricsEmpirical(assign_mat, pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "test_metrics.csv"))
+
+write.csv(test_results, file=file.path(modOutputFolder, "rubias_self_assignments.csv"))
+```
+
+### Assign unknowns
+```{r}
+start <- Sys.time()
+assignResults <- infer_mixture(
+  reference = dat, mixture = datUnknown, gen_start_col = 5)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# PofZ is the posterior means of group membership in each collection
+# AKA Bayes Estimator
+# It's essentially created posterior distributions for each of the collections
+# and then determined how the unknown samples fall within these distributions
+assignResults <- assignResults$indiv_posteriors %>%
+  group_by(indiv) %>%
+  top_n(1, PofZ) %>%
+  ungroup()
+
+assignResults <- assignResults %>%
+  rename(pred.pop = collection)
+
+assignResults <- merge(assignResults, popmap, by.x = "indiv", by.y = "sampleID")
+assignResults <- merge(assignResults, pop_xwalk %>% gather(), by.x = "pred.pop", 
+                       by.y = "value", all.x = TRUE)
+assignResults <- assignResults %>%
+  dplyr::select(-pred.pop) %>%
+  rename(pred.pop = key,
+         real.pop =pop)
+assignResults <- assignResults %>% 
+  mutate(success = case_when(pred.pop == real.pop ~ 1,
+                             pred.pop != real.pop ~ 0))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(indiv, pred.pop, real.pop) %>%
+  rename(sampleID = indiv,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(modOutputFolder, "assignment_predictions.csv"))
+
+# Create confusion matrix
+assign_mat <- createConfusionMatrix(assignResults, pop_xwalk, FALSE)
+
+# Write performance metrics to CSV
+perfMetrics <- reportPerformanceMetricsEmpirical(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(modOutputFolder, "unknown_metrics.csv"))
+```

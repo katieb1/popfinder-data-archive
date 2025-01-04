@@ -1,0 +1,70 @@
+initialize() {
+	initializeMutationRate(1e-7);
+	
+	// m1 mutation type: neutral
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	
+	// g1 genomic element type: uses m1 for all mutations
+	initializeGenomicElementType("g1", m1, 1.0);
+	
+	// uniform chromosome of length 1000 kb with uniform recombination
+	initializeGenomicElement(g1, 0, 999999);
+	initializeRecombinationRate(1e-8);
+}
+
+
+// create 5 populations of individuals + set migration rates
+1 {
+	sim.addSubpop("p1", 5000);
+        sim.addSubpop("p2", 5000);
+        sim.addSubpop("p3", 5000);
+        sim.addSubpop("p4", 5000);
+        sim.addSubpop("p5", 5000);
+	
+	p1.setMigrationRates(p2, 0.0001);
+	p1.setMigrationRates(p3, 0.0001);
+	p1.setMigrationRates(p4, 0.0001);
+	p1.setMigrationRates(p5, 0.0001);
+	p2.setMigrationRates(p1, 0.0001);
+	p2.setMigrationRates(p3, 0.0001);
+	p2.setMigrationRates(p4, 0.0001);
+	p2.setMigrationRates(p5, 0.0001);
+	p3.setMigrationRates(p1, 0.0001);
+	p3.setMigrationRates(p2, 0.0001);
+	p3.setMigrationRates(p4, 0.0001);
+	p3.setMigrationRates(p5, 0.0001);
+	p4.setMigrationRates(p1, 0.0001);
+	p4.setMigrationRates(p2, 0.0001);
+	p4.setMigrationRates(p3, 0.0001);
+	p4.setMigrationRates(p5, 0.0001);
+	p5.setMigrationRates(p1, 0.0001);
+	p5.setMigrationRates(p2, 0.0001);
+	p5.setMigrationRates(p3, 0.0001);
+	p5.setMigrationRates(p4, 0.0001);
+	
+}
+
+
+// output VCF file where first 20 = p1, second 20 = p2, etc.
+100000 late(){
+
+	cat("p1_p2_FST: " + calcFST(p1.genomes, p2.genomes) + "\n");
+	cat("p1_p3_FST: " + calcFST(p1.genomes, p3.genomes) + "\n");
+	cat("p1_p4_FST: " + calcFST(p1.genomes, p4.genomes) + "\n");
+	cat("p1_p5_FST: " + calcFST(p1.genomes, p5.genomes) + "\n");
+	cat("p2_p3_FST: " + calcFST(p2.genomes, p3.genomes) + "\n");
+	cat("p2_p4_FST: " + calcFST(p2.genomes, p4.genomes) + "\n");
+	cat("p2_p5_FST: " + calcFST(p2.genomes, p5.genomes) + "\n");
+	cat("p3_p4_FST: " + calcFST(p3.genomes, p4.genomes) + "\n");
+	cat("p3_p5_FST: " + calcFST(p3.genomes, p5.genomes) + "\n");
+	cat("p4_p5_FST: " + calcFST(p4.genomes, p5.genomes) + "\n");
+	
+	p1Individuals = sample(p1.individuals, 1000, replace=F);
+	p2Individuals = sample(p2.individuals, 1000, replace=F);
+	p3Individuals = sample(p3.individuals, 1000, replace=F);
+	p4Individuals = sample(p4.individuals, 1000, replace=F);
+	p5Individuals = sample(p5.individuals, 1000, replace=F);
+	
+	sample_vector = c(p1Individuals, p2Individuals, p3Individuals, p4Individuals, p5Individuals);
+	sample_vector.genomes.outputVCF();
+}

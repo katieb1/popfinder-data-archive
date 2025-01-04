@@ -1,0 +1,367 @@
+---
+title: "assignPop"
+author: "Katie Birchard"
+date: "19/01/2021"
+output: html_document
+---
+# Setup
+
+## Load packages
+```{r}
+library(plot.matrix)
+library(klaR)
+library(assignPOP)
+library(ggplot2)
+library(tidyverse)
+library(caret)
+library(Metrics)
+library(mltools)
+
+# Load custom functions
+source("assignPOP_mod.R")
+source("../helperFunctions.R")
+```
+
+
+## Define constants
+```{r}
+outputFolderPath <- "F:/PopFinder/Results/assignPOP/"
+```
+
+
+## Define populations
+```{r}
+# Crosswalk between population names and assignPOP IDs
+pop_xwalk <- data.frame(p1 = c(2),
+                        p2 = c(3),
+                        p3 = c(4),
+                        p4 = c(5),
+                        p5 = c(6))
+```
+
+
+## Read input file
+
+* Structure format
+
+```{r}
+oldmod1 <- read.Structure("C:/gitprojects/seabird-pop-assignment/sims/structure_runs/mod1_structure/mod1_500_popflag.str", ploidy = 2)
+
+structureFolder <- "F:/PopFinder/Data/simulated data/structure"
+
+mod1 <- read.Structure(
+  file.path(structureFolder, "model1_LS_500random.str"), ploidy=2)
+mod1_20inds <- read.Structure(
+  file.path(structureFolder, "model1_LS_500random_20inds.str"), ploidy=2)
+mod1_unknown <- read.Structure(
+  file.path(structureFolder, "model1_LS_500random_unknown.str"), ploidy=2)
+mod2 <- read.Structure(
+  file.path(structureFolder, "model2_MS_500random.str"), ploidy=2)
+mod2_unknown <- read.Structure(
+  file.path(structureFolder, "model2_MS_500random_unknown.str"), ploidy=2)
+mod3 <- read.Structure(
+  file.path(structureFolder, "model3_HS_500random.str"), ploidy=2)
+mod3_unknown <- read.Structure(
+  file.path(structureFolder, "model3_HS_500random_unknown.str"), ploidy=2)
+```
+# Preliminary Tests
+## Test with original data
+```{r}
+# Perform k-fold cross-validation
+assign.kfold(oldmod1, k.fold=c(5), train.loci = c(1),
+             dir="oldmod1_test_output/", model="randomForest")
+oldmod1_acc <- accuracy.kfold(dir="oldmod1_test_output/")
+
+# Find average accuracy from the 20 fold run - 0.3
+oldmod1_acc %>%
+  filter(KF == 5) %>%
+  dplyr::select(assign.rate.all) %>%
+  summarize(acc = mean(assign.rate.all))
+
+# Look at variation in accuracy across runs
+accuracy.plot(oldmod1_acc)
+membership.plot(dir="oldmod1_test_output/", style=1)
+assign_mat <- assign.matrix_mod(dir="oldmod1_test_output/", k.fold=5)
+assign_dat <- data.frame(assign_mat[[1]])
+
+ggplot(assign_dat, aes(x=origin, y=assignment, fill=Freq)) +
+  geom_raster() +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="darkblue", limits=c(0,1)) +
+  ggtitle("Model 1: Low Structure - Assignment Accuracy") +
+  theme_bw()
+```
+## Test with 20 individuals
+```{r}
+# Perform k-fold cross-validation
+assign.kfold(mod1_20inds, k.fold=c(5), train.loci = c(1),
+             dir="mod1_20inds_test_output/", model="randomForest")
+mod1_20inds_acc <- accuracy.kfold(dir="mod1_20inds_test_output/")
+
+# Find average accuracy from the 20 fold run - 0.3
+mod1_20inds_acc %>%
+  filter(KF == 5) %>%
+  dplyr::select(assign.rate.all) %>%
+  summarize(acc = mean(assign.rate.all))
+
+# Look at variation in accuracy across runs
+accuracy.plot(mod1_20inds_acc)
+membership.plot(dir="mod1_20inds_test_output/", style=1)
+assign_mat <- assign.matrix_mod(dir="mod1_20inds_test_output/", k.fold=5)
+assign_dat <- data.frame(assign_mat[[1]])
+
+ggplot(assign_dat, aes(x=origin, y=assignment, fill=Freq)) +
+  geom_raster() +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="darkblue", limits=c(0,1)) +
+  ggtitle("Model 1: Low Structure - Assignment Accuracy") +
+  theme_bw()
+```
+
+
+```{r}
+# Assign on unknown individuals
+assign.X(x1 = mod1_20inds, x2 = mod1_unknown, dir="mod1_20inds_test_output/", model="randomForest")
+```
+
+
+# Model 1 
+## Test data
+
+
+```{r}
+# Setup run parameters
+output_folder = file.path(outputFolderPath, "mod1_test_output")
+plot_title = "Model 1: Weak Structure - Assignment Accuracy"
+model_type = "randomForest"
+mod <- mod1
+mod_unknown <- mod1_unknown
+
+# Perform k-fold cross-validation
+start <- Sys.time()
+assign.kfold(mod, k.fold=c(5), train.loci = c(1),
+             dir=paste0(output_folder, "/"), model=model_type)
+mod_acc <- accuracy.kfold(dir=paste0(output_folder, "/"))
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# Look at variation in accuracy across runs
+accuracy.plot(mod_acc)
+membership.plot(dir=paste0(output_folder, "/"), style=1)
+assign_mat <- assign.matrix_mod(dir=paste0(output_folder, "/"), k.fold=5)
+assign_dat <- data.frame(assign_mat[[1]])
+
+ggplot(assign_dat, aes(x=origin, y=assignment, fill=Freq)) +
+  geom_raster() +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="darkblue", limits=c(0,1)) +
+  ggtitle(plot_title) +
+  theme_bw()
+
+# Report performance metrics on test set
+perfMetrics <- reportPerformanceMetrics(assign_mat[[1]], pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(output_folder, "test_metrics.csv"))
+```
+
+## Assignment
+
+```{r}
+# Assign on unknown individuals
+start <- Sys.time()
+assign.X(x1 = mod, x2 = mod_unknown, dir=paste0(output_folder, "/"), model=model_type)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# Summarize results
+assignResults <- read.delim(file.path(output_folder, "AssignmentResult.txt"), sep=" ")
+assignResults <- assignResults %>% distinct()
+numericIDs <- unlist(str_split(assignResults$Ind.ID, "i"))
+numericIDs <- as.numeric(numericIDs[numericIDs != ""])
+assignResults <- assignResults %>% mutate(Ind.ID.numeric = numericIDs)
+assignResults <- assignResults %>% 
+  mutate(real.pop = case_when(Ind.ID.numeric < 1000 ~ 2,
+                              Ind.ID.numeric %in% 1000:2000 ~ 3,
+                              Ind.ID.numeric %in% 2000:3000 ~ 4,
+                              Ind.ID.numeric %in% 3000:4000 ~ 5,
+                              Ind.ID.numeric %in% 4000:5000 ~ 6))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(Ind.ID, pred.pop, real.pop) %>%
+  rename(sampleID = Ind.ID,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(output_folder, "assignment_predictions.csv"))
+
+# Calculate performance metrics and write to CSV
+assign_mat <- matrix(table(assignResults$real.pop, assignResults$pred.pop), nrow=5) 
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(output_folder, "unknown_metrics.csv"))
+```
+
+
+
+# Model 2
+## Test data
+
+```{r}
+# Setup run parameters
+output_folder = "F:/PopFinder/Results/assignPOP/mod2_test_output"
+plot_title = "Model 2: Intermediate Structure - Assignment Accuracy"
+model_type = "randomForest"
+mod <- mod2
+mod_unknown <- mod2_unknown
+
+# Perform k-fold cross-validation
+start <- Sys.time()
+assign.kfold(mod, k.fold=c(5), train.loci = c(1),
+             dir=paste0(output_folder, "/"), model=model_type)
+mod_acc <- accuracy.kfold(dir=paste0(output_folder, "/"))
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# Look at variation in accuracy across runs
+accuracy.plot(mod_acc)
+membership.plot(dir=paste0(output_folder, "/"), style=1)
+assign_mat <- assign.matrix_mod(dir=paste0(output_folder, "/"), k.fold=5)
+assign_dat <- data.frame(assign_mat[[1]])
+
+ggplot(assign_dat, aes(x=origin, y=assignment, fill=Freq)) +
+  geom_raster() +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="darkblue", limits=c(0,1)) +
+  ggtitle(plot_title) +
+  theme_bw()
+
+# Report performance metrics on test set
+perfMetrics <- reportPerformanceMetrics(assign_mat[[1]], pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(output_folder, "test_metrics.csv"))
+```
+
+## Assignment
+
+```{r}
+# Assign on unknown individuals
+start <- Sys.time()
+assign.X(x1 = mod, x2 = mod_unknown, dir=paste0(output_folder, "/"), model=model_type)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# Summarize results
+assignResults <- read.delim(file.path(output_folder, "AssignmentResult.txt"), sep=" ")
+assignResults <- assignResults %>% distinct()
+numericIDs <- unlist(str_split(assignResults$Ind.ID, "i"))
+numericIDs <- as.numeric(numericIDs[numericIDs != ""])
+assignResults <- assignResults %>% mutate(Ind.ID.numeric = numericIDs)
+assignResults <- assignResults %>% 
+  mutate(real.pop = case_when(Ind.ID.numeric < 1000 ~ 2,
+                              Ind.ID.numeric %in% 1000:2000 ~ 3,
+                              Ind.ID.numeric %in% 2000:3000 ~ 4,
+                              Ind.ID.numeric %in% 3000:4000 ~ 5,
+                              Ind.ID.numeric %in% 4000:5000 ~ 6))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(Ind.ID, pred.pop, real.pop) %>%
+  dplyr::rename(sampleID = Ind.ID,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(output_folder, "assignment_predictions.csv"))
+
+# Calculate performance metrics and write to CSV
+assign_mat <- matrix(table(assignResults$real.pop, assignResults$pred.pop), nrow=5) 
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(output_folder, "unknown_metrics.csv"))
+```
+
+# Model 3
+
+## Test data
+
+```{r}
+# Setup run parameters
+output_folder = "F:/PopFinder/Results/assignPOP/mod3_test_output"
+plot_title = "Model 3: Strong Structure - Assignment Accuracy"
+model_type = "randomForest"
+mod <- mod3
+mod_unknown <- mod3_unknown
+
+# Perform k-fold cross-validation
+start <- Sys.time()
+assign.kfold(mod, k.fold=c(5), train.loci = c(1),
+             dir=paste0(output_folder, "/"), model=model_type)
+mod_acc <- accuracy.kfold(dir=paste0(output_folder, "/"))
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# Look at variation in accuracy across runs
+accuracy.plot(mod_acc)
+membership.plot(dir=paste0(output_folder, "/"), style=1)
+assign_mat <- assign.matrix_mod(dir=paste0(output_folder, "/"), k.fold=5)
+assign_dat <- data.frame(assign_mat[[1]])
+
+ggplot(assign_dat, aes(x=origin, y=assignment, fill=Freq)) +
+  geom_raster() +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient(low="white", high="darkblue", limits=c(0,1)) +
+  ggtitle(plot_title) +
+  theme_bw()
+
+# Write data to csv for plotting confusion matrix later?
+# Can just use the Out_1_Kx_1.txt files to recreate if we need
+
+# Report performance metrics on test set
+perfMetrics <- reportPerformanceMetrics(assign_mat[[1]], pop_xwalk)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(output_folder, "test_metrics.csv"))
+```
+
+## Assignment
+
+```{r}
+# Assign on unknown individuals
+start <- Sys.time()
+assign.X(x1 = mod, x2 = mod_unknown, dir=paste0(output_folder, "/"), model=model_type)
+end <- Sys.time()
+runtime <- round(end - start, 2)
+
+# Summarize results
+assignResults <- read.delim(file.path(output_folder, "AssignmentResult.txt"), sep=" ")
+assignResults <- assignResults %>% distinct()
+numericIDs <- unlist(str_split(assignResults$Ind.ID, "i"))
+numericIDs <- as.numeric(numericIDs[numericIDs != ""])
+assignResults <- assignResults %>% mutate(Ind.ID.numeric = numericIDs)
+assignResults <- assignResults %>% 
+  mutate(real.pop = case_when(Ind.ID.numeric < 1000 ~ 2,
+                              Ind.ID.numeric %in% 1000:2000 ~ 3,
+                              Ind.ID.numeric %in% 2000:3000 ~ 4,
+                              Ind.ID.numeric %in% 3000:4000 ~ 5,
+                              Ind.ID.numeric %in% 4000:5000 ~ 6))
+
+# Write results to CSV (standardized format for creating confusion matrices)
+# Just include dataframe of actual versus predicted + sample ID
+assignResults %>%
+  dplyr::select(Ind.ID, pred.pop, real.pop) %>%
+  dplyr::rename(sampleID = Ind.ID,
+         predicted = pred.pop,
+         actual = real.pop) %>%
+  write_csv(file.path(output_folder, "assignment_predictions.csv"))
+
+# Calculate performance metrics and write to CSV
+assign_mat <- matrix(table(assignResults$real.pop, assignResults$pred.pop), nrow=5) 
+perfMetrics <- reportPerformanceMetrics(assign_mat, pop_xwalk, assignResults)
+perfMetrics <- rbind(perfMetrics, data.frame(key = "runtime", value = runtime))
+perfMetrics %>%
+  write_csv(file.path(output_folder, "unknown_metrics.csv"))
+```
